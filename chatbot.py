@@ -28,7 +28,7 @@ CHAT_DB_FILE = DATA_DIR / "chat_history.sqlite3"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_OLLAMA_MODEL = "qwen3:4b"
 DEFAULT_OPENAI_MAX_TOKENS = 2048
-DEFAULT_OLLAMA_MAX_TOKENS = 256
+DEFAULT_OLLAMA_MAX_TOKENS = 4096
 
 
 def ensure_data_dir() -> None:
@@ -782,8 +782,8 @@ with st.sidebar:
 
         st.session_state.ollama_model = model
         st.caption("Auto-detected from /api/tags. Example local models: qwen3:4b, llama3.2, mistral, qwen2.5")
-        max_tokens_default = st.session_state.get("max_tokens_ollama", DEFAULT_OLLAMA_MAX_TOKENS)
-        max_tokens_max = 1024
+        max_tokens_default = max(st.session_state.get("max_tokens_ollama", DEFAULT_OLLAMA_MAX_TOKENS), DEFAULT_OLLAMA_MAX_TOKENS)
+        max_tokens_max = 16384
 
     temperature = st.slider(
         "Temperature:",
@@ -800,7 +800,7 @@ with st.sidebar:
         min_value=32,
         max_value=max_tokens_max,
         value=int(max_tokens_default),
-        step=32 if provider == "Ollama" else 100,
+        step=128 if provider == "Ollama" else 100,
     )
     st.session_state.max_tokens = int(max_tokens)
 

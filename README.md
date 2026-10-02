@@ -104,7 +104,7 @@ On Ubuntu Server, `start.sh` binds Streamlit to `0.0.0.0:8501` so you can reach 
 4. **Add your credentials**: OpenAI API key or Ollama URL ending in `:11434`
 5. **Select your preferences**: Choose model, temperature, and max tokens in the sidebar
    - Ollama models are pulled automatically from the local Ollama server
-   - Local Ollama defaults to a smaller token budget that is better for CPU inference
+   - Local Ollama defaults to a smaller token budget that is better for CPU inference, but you can raise the max much higher for longer answers
 6. **Start chatting**: Type your message and press Enter
 7. **Use private chat**: Click "Private" to keep a temporary, non-persisted conversation
 8. **Export / import chats**: Back up your conversations to JSON and restore them later
@@ -126,6 +126,8 @@ On Ubuntu Server, `start.sh` binds Streamlit to `0.0.0.0:8501` so you can reach 
 - Controls the maximum length of responses
 - Default: 2048 tokens
 - Adjust based on your needs
+- For Ollama, the app now defaults to a higher token budget to avoid truncated replies on local models
+- The Ollama max token slider now goes up to 16384 for longer generations
 
 ### Chat Storage
 - Saved chats are stored locally in `.streamlit/chat_history.sqlite3`
