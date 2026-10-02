@@ -1,14 +1,17 @@
-# ChatGPT-like Chatbot with Streamlit & LangChain
+# Oscar's Chatbot with Streamlit & LangChain
 
-A simple, user-friendly ChatGPT clone built with Streamlit and LangChain that can connect to either OpenAI or a local Ollama model.
+A simple, user-friendly chatbot built with Streamlit and LangChain that can connect to either OpenAI or a local Ollama model.
 
 ## Features
 
 ✨ **Simple & Intuitive UI** - Clean chat interface with message history
 🔐 **Secure API Key Input** - Enter your API key directly in the app (or via .env file)
-🏠 **Local LLM Support** - Switch to Ollama by entering a URL like `http://localhost:11434`
+🏠 **Local LLM Support** - Switch to Ollama by entering a URL like `http://192.168.50.23:11434`
 🔎 **Auto-Detected Ollama Models** - The app reads available local models from `/api/tags`
 🗂️ **Persistent Chat History** - Chats are stored in a local SQLite database and can be continued later
+✏️ **Rename Chats** - Give any saved chat a custom title
+🔎 **Search Chats** - Search across saved chat titles and message content
+📤 **Export / Import** - Back up chats to JSON and restore them later
 ⚙️ **Customizable Settings** - Choose model, adjust temperature, set max tokens
 🧠 **Multiple Models** - Support for GPT-4o-mini, GPT-4o, GPT-3.5-turbo, and local Ollama models
 📝 **Full Chat History** - Maintain conversation context throughout your session
@@ -50,6 +53,32 @@ pip install -r requirements.txt
    .\start.ps1
    ```
 
+   On Ubuntu Server, use the Bash launcher instead:
+   ```bash
+   chmod +x start.sh
+   ./start.sh
+   ```
+
+   To run it as a background service on Ubuntu Server, install the systemd unit:
+   ```bash
+   sudo cp oscars-chatbot.service /etc/systemd/system/oscars-chatbot.service
+   sudo tee /etc/default/oscars-chatbot >/dev/null <<'EOF'
+   PROJECT_ROOT=/home/oscar/MyOtherProject
+   EOF
+   ```
+   Update `User=` in the unit so it matches the Linux account that should run the app.
+   Update `PROJECT_ROOT=` in `/etc/default/oscars-chatbot` if you clone the repo somewhere else.
+   Then enable and start the service:
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now oscars-chatbot.service
+   sudo systemctl status oscars-chatbot.service
+   ```
+   View logs with:
+   ```bash
+   journalctl -u oscars-chatbot.service -f
+   ```
+
 5. **(Optional) Stop the chatbot**
    ```powershell
    .\Stop-Chatbot.ps1
@@ -65,17 +94,20 @@ streamlit run chatbot.py
 
 The app will open in your browser at `http://localhost:8501`
 
+On Ubuntu Server, `start.sh` binds Streamlit to `0.0.0.0:8501` so you can reach it from another machine.
+
 ## Usage
 
 1. **Choose your provider**: OpenAI or Ollama in the sidebar
-2. **Browse previous chats**: Select a saved conversation to continue it
-3. **Add your credentials**: OpenAI API key or Ollama URL ending in `:11434`
-4. **Select your preferences**: Choose model, temperature, and max tokens in the sidebar
+2. **Search or browse previous chats**: Use the search box to find a saved conversation, then open it from the list
+3. **Rename, export, or delete chats**: Manage conversations from the sidebar controls
+4. **Add your credentials**: OpenAI API key or Ollama URL ending in `:11434`
+5. **Select your preferences**: Choose model, temperature, and max tokens in the sidebar
    - Ollama models are pulled automatically from the local Ollama server
    - Local Ollama defaults to a smaller token budget that is better for CPU inference
-5. **Start chatting**: Type your message and press Enter
-6. **Use private chat**: Click "Private" to keep a temporary, non-persisted conversation
-7. **Delete chats**: Remove any saved conversation from the sidebar
+6. **Start chatting**: Type your message and press Enter
+7. **Use private chat**: Click "Private" to keep a temporary, non-persisted conversation
+8. **Export / import chats**: Back up your conversations to JSON and restore them later
 
 ## Configuration
 
@@ -98,7 +130,13 @@ The app will open in your browser at `http://localhost:8501`
 ### Chat Storage
 - Saved chats are stored locally in `.streamlit/chat_history.sqlite3`
 - Private chats are not written to disk
-- You can continue, delete, or start a fresh chat from the sidebar
+- You can continue, rename, search, delete, export, import, or start a fresh chat from the sidebar
+
+### Ubuntu Server Notes
+- Use `start.sh` to create/update the virtual environment and start Streamlit headless
+- The launcher binds to `0.0.0.0:8501` for remote access
+- You can also run the app under `systemd` by installing `oscars-chatbot.service`
+- The service reads `PROJECT_ROOT` from `/etc/default/oscars-chatbot`
 
 ## Project Structure
 
@@ -106,6 +144,8 @@ The app will open in your browser at `http://localhost:8501`
 ├── chatbot.py          # Main Streamlit application
 ├── requirements.txt    # Python dependencies
 ├── start.ps1           # PowerShell launcher
+├── start.sh            # Bash launcher for Ubuntu/Linux
+├── oscars-chatbot.service # systemd service unit for Ubuntu Server
 ├── Stop-Chatbot.ps1    # PowerShell stop script
 ├── .gitignore          # Git ignore rules
 ├── .env.example       # Example environment file
@@ -136,7 +176,7 @@ The `.env` file is loaded automatically if it exists, allowing you to store sens
 
 - **streamlit** - Web app framework
 - **langchain-openai** - OpenAI integration for LangChain
-- **langchain-ollama** - Ollama integration for LangChain
+- **requests** - HTTP client used for direct Ollama API calls
 - **python-dotenv** - Environment variable management
 
 ## License

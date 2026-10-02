@@ -1,0 +1,16 @@
+[Unit]
+Description=Oscar's Chatbot Streamlit App
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=oscar
+EnvironmentFile=-/etc/default/oscars-chatbot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/bin/bash -lc 'cd "${PROJECT_ROOT:?PROJECT_ROOT is not set}" && exec ./start.sh'
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

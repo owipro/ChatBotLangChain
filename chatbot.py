@@ -3,6 +3,7 @@ import os
 import sqlite3
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
@@ -12,10 +13,9 @@ from urllib.request import urlopen
 
 import streamlit as st
 from dotenv import load_dotenv
-from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage
-from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
+import requests
 from streamlit.runtime.scriptrunner import get_script_run_ctx
 
 load_dotenv()
@@ -62,8 +62,8 @@ if get_script_run_ctx() is not None:
             pass
     start_stop_watcher()
 
-st.set_page_config(page_title="ChatGPT Clone", page_icon="💬", layout="wide")
-st.title("💬 ChatGPT-like Chatbot")
+st.set_page_config(page_title="Oscar's Chatbot", page_icon="💬", layout="wide")
+st.title("💬 Oscar's Chatbot")
 
 
 def utc_now_iso() -> str:
@@ -160,7 +160,7 @@ def create_chat(
     max_tokens: int,
     is_private: bool,
 ) -> str:
-    chat_id = f"chat-{int(time.time() * 1000)}-{os.getpid()}"
+    chat_id = f"chat-{int(time.time() * 1000)}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
     timestamp = utc_now_iso()
     with get_db_connection() as connection:
         connection.execute(
@@ -223,6 +223,14 @@ def delete_chat(chat_id: str) -> None:
         connection.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
 
 
+def rename_chat(chat_id: str, new_title: str) -> None:
+    with get_db_connection() as connection:
+        connection.execute(
+            "UPDATE chats SET title = ?, updated_at = ? WHERE id = ?",
+            (new_title.strip() or "Untitled chat", utc_now_iso(), chat_id),
+        )
+
+
 def derive_chat_title(prompt: str) -> str:
     clean = " ".join(prompt.strip().split())
     if not clean:
@@ -232,18 +240,206 @@ def derive_chat_title(prompt: str) -> str:
     return clean[:45].rstrip() + "..."
 
 
+def chat_to_payload(chat_row: sqlite3.Row, messages: list[dict[str, str]]) -> dict[str, object]:
+    return {
+        "id": chat_row["id"],
+        "title": chat_row["title"],
+        "provider": chat_row["provider"],
+        "model": chat_row["model"],
+        "ollama_url": chat_row["ollama_url"],
+        "temperature": chat_row["temperature"],
+        "max_tokens": chat_row["max_tokens"],
+        "is_private": bool(chat_row["is_private"]),
+        "created_at": chat_row["created_at"],
+        "updated_at": chat_row["updated_at"],
+        "messages": messages,
+    }
+
+
+def serialize_chat_payload(chat_row: sqlite3.Row, messages: list[dict[str, str]]) -> str:
+    payload = {
+        "app": "Oscar's Chatbot",
+        "version": 1,
+        "exported_at": utc_now_iso(),
+        "chats": [chat_to_payload(chat_row, messages)],
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def serialize_all_chats_payload(chat_ids: list[str] | None = None) -> str:
+    selected_chat_ids = chat_ids if chat_ids is not None else [row["id"] for row in list_chats()]
+    chats: list[dict[str, object]] = []
+    for chat_id in selected_chat_ids:
+        chat_row, messages = load_chat(chat_id)
+        if chat_row is not None:
+            chats.append(chat_to_payload(chat_row, messages))
+    payload = {
+        "app": "Oscar's Chatbot",
+        "version": 1,
+        "exported_at": utc_now_iso(),
+        "chats": chats,
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def serialize_current_session_payload() -> str:
+    payload = {
+        "app": "Oscar's Chatbot",
+        "version": 1,
+        "exported_at": utc_now_iso(),
+        "chats": [
+            {
+                "id": st.session_state.current_chat_id or f"session-{uuid.uuid4().hex[:8]}",
+                "title": st.session_state.current_chat_title or "Untitled chat",
+                "provider": st.session_state.provider,
+                "model": st.session_state.ollama_model if st.session_state.provider == "Ollama" else st.session_state.openai_model,
+                "ollama_url": st.session_state.ollama_url if st.session_state.provider == "Ollama" else None,
+                "temperature": float(st.session_state.temperature),
+                "max_tokens": int(st.session_state.max_tokens),
+                "is_private": st.session_state.chat_mode == "private",
+                "created_at": utc_now_iso(),
+                "updated_at": utc_now_iso(),
+                "messages": st.session_state.messages,
+            }
+        ],
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def import_chat_record(chat_data: dict[str, object]) -> str:
+    messages = chat_data.get("messages", [])
+    if not isinstance(messages, list):
+        messages = []
+
+    original_id = str(chat_data.get("id") or "")
+    candidate_id = original_id or f"chat-{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
+
+    with get_db_connection() as connection:
+        existing = connection.execute("SELECT 1 FROM chats WHERE id = ?", (candidate_id,)).fetchone()
+        if existing is not None:
+            candidate_id = f"{candidate_id}-{uuid.uuid4().hex[:8]}"
+
+        title = str(chat_data.get("title") or "").strip()
+        if not title:
+            first_user_message = next(
+                (str(message.get("content", "")) for message in messages if isinstance(message, dict) and message.get("role") == "user"),
+                "",
+            )
+            title = derive_chat_title(first_user_message) if first_user_message else "Imported chat"
+
+        provider = str(chat_data.get("provider") or "OpenAI")
+        model = str(chat_data.get("model") or DEFAULT_OPENAI_MODEL)
+        ollama_url = chat_data.get("ollama_url")
+        ollama_url_value = str(ollama_url) if ollama_url else None
+        temperature = float(chat_data.get("temperature") or 0.7)
+        max_tokens = int(chat_data.get("max_tokens") or DEFAULT_OPENAI_MAX_TOKENS)
+        is_private = False
+        created_at = str(chat_data.get("created_at") or utc_now_iso())
+        updated_at = str(chat_data.get("updated_at") or created_at)
+
+        connection.execute(
+            """
+            INSERT INTO chats (
+                id, title, provider, model, ollama_url, temperature, max_tokens, is_private, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                candidate_id,
+                title,
+                provider,
+                model,
+                ollama_url_value,
+                temperature,
+                max_tokens,
+                1 if is_private else 0,
+                created_at,
+                updated_at,
+            ),
+        )
+
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            role = str(message.get("role") or "assistant")
+            content = str(message.get("content") or "")
+            created = str(message.get("created_at") or utc_now_iso())
+            connection.execute(
+                "INSERT INTO messages (chat_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+                (candidate_id, role, content, created),
+            )
+
+    return candidate_id
+
+
+def import_chats_from_payload(payload: dict[str, object]) -> list[str]:
+    chats = payload.get("chats")
+    if not isinstance(chats, list):
+        chats = [payload]
+
+    imported_chat_ids: list[str] = []
+    for chat_data in chats:
+        if isinstance(chat_data, dict):
+            imported_chat_ids.append(import_chat_record(chat_data))
+
+    return imported_chat_ids
+
+
+def search_chats(query: str) -> list[sqlite3.Row]:
+    cleaned = query.strip().lower()
+    if not cleaned:
+        return list_chats()
+
+    like_pattern = f"%{cleaned}%"
+    with get_db_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT DISTINCT c.id, c.title, c.provider, c.model, c.ollama_url, c.temperature, c.max_tokens, c.is_private, c.created_at, c.updated_at
+            FROM chats c
+            LEFT JOIN messages m ON m.chat_id = c.id
+            WHERE lower(c.title) LIKE ?
+               OR lower(c.provider) LIKE ?
+               OR lower(c.model) LIKE ?
+               OR lower(coalesce(c.ollama_url, '')) LIKE ?
+               OR lower(coalesce(m.content, '')) LIKE ?
+            ORDER BY c.updated_at DESC, c.created_at DESC
+            """,
+            (like_pattern, like_pattern, like_pattern, like_pattern, like_pattern),
+        ).fetchall()
+    return list(rows)
+
+
+def export_chat_filename(title: str, suffix: str = "json") -> str:
+    safe = "".join(character if character.isalnum() or character in {"-", "_"} else "-" for character in title.strip().lower())
+    safe = "-".join(part for part in safe.split("-") if part)
+    if not safe:
+        safe = "chat-export"
+    return f"{safe[:48]}.{suffix}"
+
+
+def get_current_chat_export_json() -> str:
+    if st.session_state.current_chat_id and not st.session_state.current_chat_is_private:
+        chat_row, messages = load_chat(st.session_state.current_chat_id)
+        if chat_row is not None:
+            return serialize_chat_payload(chat_row, messages)
+
+    return serialize_current_session_payload()
+
+
 def ensure_session_defaults() -> None:
     defaults = {
         "messages": [],
         "chat_mode": "existing",
         "current_chat_id": None,
         "current_chat_title": None,
+        "current_chat_is_private": False,
         "provider": "OpenAI",
         "openai_api_key": os.getenv("OPENAI_API_KEY", ""),
-        "ollama_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+        "openai_model": DEFAULT_OPENAI_MODEL,
+        "ollama_url": os.getenv("OLLAMA_BASE_URL", "http://192.168.50.23:11434"),
         "ollama_model": DEFAULT_OLLAMA_MODEL,
         "temperature": 0.7,
         "max_tokens": DEFAULT_OPENAI_MAX_TOKENS,
+        "chat_search_query": "",
     }
 
     for key, value in defaults.items():
@@ -255,6 +451,7 @@ def reset_to_new_chat(private: bool) -> None:
     st.session_state.chat_mode = "private" if private else "new"
     st.session_state.current_chat_id = None
     st.session_state.current_chat_title = "Private chat" if private else "New chat"
+    st.session_state.current_chat_is_private = private
     st.session_state.messages = []
 
 
@@ -262,6 +459,8 @@ def load_chat_into_state(chat_row: sqlite3.Row, messages: list[dict[str, str]]) 
     st.session_state.chat_mode = "existing"
     st.session_state.current_chat_id = chat_row["id"]
     st.session_state.current_chat_title = chat_row["title"]
+    st.session_state.current_chat_is_private = bool(chat_row["is_private"])
+    st.session_state.sidebar_chat_selector = chat_row["id"]
     st.session_state.selected_chat_id = chat_row["id"]
     st.session_state.provider = chat_row["provider"]
     st.session_state.temperature = float(chat_row["temperature"])
@@ -272,6 +471,7 @@ def load_chat_into_state(chat_row: sqlite3.Row, messages: list[dict[str, str]]) 
         st.session_state.ollama_url = chat_row["ollama_url"] or st.session_state.ollama_url
         st.session_state.ollama_model = chat_row["model"]
     else:
+        st.session_state.openai_model = chat_row["model"]
         st.session_state.openai_api_key = st.session_state.openai_api_key or os.getenv("OPENAI_API_KEY", "")
 
 
@@ -282,10 +482,83 @@ def build_messages(chat_history: list[dict[str, str]]) -> list[HumanMessage | AI
     ]
 
 
-def stream_response(llm: BaseChatModel, messages: list[HumanMessage | AIMessage]) -> Iterable[str]:
+def stream_openai_response(llm: ChatOpenAI, messages: list[HumanMessage | AIMessage]) -> Iterable[str]:
+    yielded_any = False
     for chunk in llm.stream(messages):
-        if chunk.content:
-            yield chunk.content
+        content = getattr(chunk, "content", "")
+        if content:
+            yielded_any = True
+            yield str(content)
+
+    if not yielded_any:
+        response = llm.invoke(messages)
+        content = getattr(response, "content", "")
+        if content:
+            yield str(content)
+
+
+def message_list_to_ollama_payload(messages: list[HumanMessage | AIMessage]) -> list[dict[str, str]]:
+    payload_messages: list[dict[str, str]] = []
+    for message in messages:
+        if isinstance(message, HumanMessage):
+            role = "user"
+        else:
+            role = "assistant"
+        payload_messages.append({"role": role, "content": str(message.content)})
+    return payload_messages
+
+
+def stream_ollama_response(
+    ollama_url: str,
+    model: str,
+    messages: list[HumanMessage | AIMessage],
+    temperature: float,
+    max_tokens: int,
+) -> Iterable[str]:
+    payload = {
+        "model": model,
+        "messages": message_list_to_ollama_payload(messages),
+        "stream": True,
+        "options": {
+            "temperature": temperature,
+            "num_predict": max_tokens,
+        },
+    }
+
+    yielded_any = False
+    with requests.post(
+        ollama_url.rstrip("/") + "/api/chat",
+        json=payload,
+        stream=True,
+        timeout=300,
+    ) as response:
+        response.raise_for_status()
+        for line in response.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            chunk = json.loads(line)
+            content = chunk.get("message", {}).get("content", "")
+            if content:
+                yielded_any = True
+                yield str(content)
+            if chunk.get("done"):
+                break
+
+    if not yielded_any:
+        fallback_response = requests.post(
+            ollama_url.rstrip("/") + "/api/chat",
+            json={**payload, "stream": False},
+            timeout=300,
+        )
+        fallback_response.raise_for_status()
+        fallback_data = fallback_response.json()
+        content = fallback_data.get("message", {}).get("content", "")
+        if not content:
+            thinking = fallback_data.get("message", {}).get("thinking", "")
+            if thinking:
+                content = thinking
+        if content:
+            yield str(content)
 
 
 def validate_ollama_url(url: str) -> str:
@@ -319,6 +592,14 @@ def format_chat_label(chat_row: sqlite3.Row) -> str:
     return f"{chat_row['title']} · {chat_row['provider']} · {chat_row['model']}{private_suffix} · {updated[:16]}"
 
 
+def sync_rename_input_state() -> str:
+    rename_widget_key = "chat_rename_input_" + (st.session_state.current_chat_id or st.session_state.chat_mode)
+    current_title = st.session_state.current_chat_title or ""
+    if st.session_state.get(rename_widget_key) != current_title:
+        st.session_state[rename_widget_key] = current_title
+    return rename_widget_key
+
+
 init_chat_db()
 ensure_session_defaults()
 
@@ -333,62 +614,119 @@ if st.session_state.chat_mode == "existing" and st.session_state.current_chat_id
     elif st.session_state.messages == [] and loaded_messages:
         load_chat_into_state(chat_row, loaded_messages)
 
+rename_widget_key = sync_rename_input_state()
+
 with st.sidebar:
     st.header("Chats")
 
-    persisted_chats = list_chats()
+    st.text_input(
+        "Search saved chats",
+        key="chat_search_query",
+        placeholder="Search titles or message text",
+    )
+    persisted_chats = search_chats(st.session_state.chat_search_query)
+
+    selected_chat_id = None
     if persisted_chats:
-        if st.session_state.chat_mode == "existing":
-            chat_ids = [row["id"] for row in persisted_chats]
-            labels = {row["id"]: format_chat_label(row) for row in persisted_chats}
-            default_index = 0
-            if st.session_state.current_chat_id in chat_ids:
-                default_index = chat_ids.index(st.session_state.current_chat_id)
+        st.caption(f"{len(persisted_chats)} saved chat(s) found.")
+        chat_ids = [row["id"] for row in persisted_chats]
+        labels = {row["id"]: format_chat_label(row) for row in persisted_chats}
+        default_index = 0
+        if st.session_state.current_chat_id in chat_ids:
+            default_index = chat_ids.index(st.session_state.current_chat_id)
 
-            selected_chat_id = st.selectbox(
-                "Previous chats",
-                options=chat_ids,
-                index=default_index,
-                format_func=lambda chat_id: labels.get(chat_id, chat_id),
-                key="selected_chat_id",
-            )
-
-            if selected_chat_id != st.session_state.current_chat_id:
-                selected_chat, selected_messages = load_chat(selected_chat_id)
-                if selected_chat is not None:
-                    load_chat_into_state(selected_chat, selected_messages)
-                    st.rerun()
-        else:
-            st.caption("Click 'Continue existing' to browse previous chats.")
-    else:
-        st.caption("No saved chats yet.")
-
-    chat_actions = st.columns(3)
-    if chat_actions[0].button("Continue existing", use_container_width=True):
-        if persisted_chats:
-            selected_chat, selected_messages = load_chat(persisted_chats[0]["id"])
+        selected_chat_id = st.selectbox(
+            "Previous chats",
+            options=chat_ids,
+            index=default_index,
+            format_func=lambda chat_id: labels.get(chat_id, chat_id),
+            key="sidebar_chat_selector",
+        )
+        if st.button("Open selected chat", use_container_width=True):
+            selected_chat, selected_messages = load_chat(selected_chat_id)
             if selected_chat is not None:
                 load_chat_into_state(selected_chat, selected_messages)
+                st.rerun()
+    else:
+        if st.session_state.chat_search_query.strip():
+            st.caption("No saved chats matched your search.")
         else:
-            st.session_state.chat_mode = "new"
-            st.session_state.messages = []
-            st.session_state.current_chat_id = None
-            st.session_state.current_chat_title = "New chat"
-        st.rerun()
+            st.caption("No saved chats yet.")
 
-    if chat_actions[1].button("New chat", use_container_width=True):
+    chat_actions = st.columns(3)
+    if chat_actions[0].button("New chat", use_container_width=True):
         reset_to_new_chat(private=False)
         st.rerun()
 
-    if chat_actions[2].button("Private", use_container_width=True):
+    if chat_actions[1].button("Private", use_container_width=True):
         reset_to_new_chat(private=True)
         st.rerun()
 
-    if st.session_state.chat_mode == "existing" and st.session_state.current_chat_id:
-        if st.button("Delete current chat", use_container_width=True):
+    delete_disabled = not (st.session_state.current_chat_id and not st.session_state.current_chat_is_private)
+    if chat_actions[2].button("Delete", use_container_width=True, disabled=delete_disabled):
+        if st.session_state.current_chat_id:
             delete_chat(st.session_state.current_chat_id)
-            reset_to_new_chat(private=False)
+        reset_to_new_chat(private=False)
+        st.rerun()
+
+    can_rename = st.session_state.current_chat_is_private or bool(st.session_state.current_chat_id)
+    with st.form("rename_chat_form", clear_on_submit=False):
+        rename_value = st.text_input(
+            "Rename current chat",
+            key=rename_widget_key,
+            disabled=not can_rename,
+            placeholder="Enter a new chat title",
+        )
+        rename_submitted = st.form_submit_button("Save title", disabled=not can_rename)
+
+    if rename_submitted:
+        new_title = rename_value.strip()
+        if not new_title:
+            st.error("Please enter a non-empty title.")
+        else:
+            st.session_state.current_chat_title = new_title
+            st.session_state[rename_widget_key] = new_title
+            if st.session_state.current_chat_is_private:
+                st.session_state.chat_mode = "private"
+            elif st.session_state.current_chat_id:
+                rename_chat(st.session_state.current_chat_id, new_title)
+            st.success("Chat title updated.")
             st.rerun()
+
+    st.divider()
+    with st.expander("Export / import chats", expanded=False):
+        current_chat_title = st.session_state.current_chat_title or "chat"
+        current_export_json = get_current_chat_export_json()
+        st.download_button(
+            "Export current chat",
+            data=current_export_json,
+            file_name=export_chat_filename(current_chat_title),
+            mime="application/json",
+            use_container_width=True,
+        )
+        st.download_button(
+            "Export all chats",
+            data=serialize_all_chats_payload(),
+            file_name="oscars-chatbot-export.json",
+            mime="application/json",
+            use_container_width=True,
+        )
+
+        import_file = st.file_uploader("Import chats from JSON", type=["json"], accept_multiple_files=False)
+        if st.button("Import selected file", use_container_width=True, disabled=import_file is None):
+            try:
+                imported_payload = json.loads(import_file.getvalue().decode("utf-8"))
+                imported_chat_ids = import_chats_from_payload(imported_payload)
+                if imported_chat_ids:
+                    imported_chat, imported_messages = load_chat(imported_chat_ids[0])
+                    if imported_chat is not None:
+                        load_chat_into_state(imported_chat, imported_messages)
+                    st.success(f"Imported {len(imported_chat_ids)} chat(s).")
+                    st.rerun()
+                else:
+                    st.warning("No chats were found in the selected file.")
+            except Exception as exc:
+                st.error(f"Could not import chats: {exc}")
 
     st.divider()
     st.header("Settings")
@@ -397,6 +735,8 @@ with st.sidebar:
     st.session_state.provider = provider
 
     if provider == "OpenAI":
+        openai_models = [DEFAULT_OPENAI_MODEL, "gpt-4o", "gpt-3.5-turbo"]
+        current_openai_model = st.session_state.openai_model if st.session_state.openai_model in openai_models else DEFAULT_OPENAI_MODEL
         api_key = st.text_input(
             "Enter your OpenAI API Key:",
             type="password",
@@ -407,7 +747,8 @@ with st.sidebar:
         if not api_key:
             st.warning("Please enter your OpenAI API Key to continue.")
 
-        model = st.selectbox("Select Model:", ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"], index=0)
+        model = st.selectbox("Select Model:", openai_models, index=openai_models.index(current_openai_model))
+        st.session_state.openai_model = model
         max_tokens_default = st.session_state.get("max_tokens_openai", DEFAULT_OPENAI_MAX_TOKENS)
         max_tokens_max = 4096
     else:
@@ -471,13 +812,13 @@ with st.sidebar:
 if st.session_state.chat_mode == "existing" and st.session_state.current_chat_title:
     st.subheader(st.session_state.current_chat_title)
 elif st.session_state.chat_mode == "private":
-    st.subheader("Private chat")
+    st.subheader(st.session_state.current_chat_title or "Private chat")
     st.caption("This chat is not persisted.")
 else:
     st.subheader("New chat")
     st.caption("This chat will be saved once you send the first message.")
 
-chat: BaseChatModel | None = None
+chat: ChatOpenAI | None = None
 chat_ready = False
 
 if provider == "OpenAI" and st.session_state.openai_api_key:
@@ -491,16 +832,9 @@ if provider == "OpenAI" and st.session_state.openai_api_key:
 elif provider == "Ollama":
     try:
         validated_ollama_url = validate_ollama_url(st.session_state.ollama_url)
+        chat_ready = True
     except ValueError:
         validated_ollama_url = None
-    else:
-        chat = ChatOllama(
-            base_url=validated_ollama_url,
-            model=model,
-            temperature=temperature,
-            num_predict=int(max_tokens),
-        )
-        chat_ready = True
 
 if chat_ready:
     for message in st.session_state.messages:
@@ -509,6 +843,12 @@ if chat_ready:
 
     if user_input := st.chat_input("What would you like to know?"):
         st.session_state.messages.append({"role": "user", "content": user_input})
+
+        if st.session_state.current_chat_title in {None, "New chat", "Private chat", "Untitled chat"}:
+            derived_title = derive_chat_title(user_input)
+            st.session_state.current_chat_title = derived_title
+            if st.session_state.current_chat_is_private:
+                st.session_state.chat_mode = "private"
 
         if st.session_state.chat_mode != "private":
             if st.session_state.current_chat_id is None:
@@ -542,10 +882,31 @@ if chat_ready:
 
         with st.chat_message("assistant"):
             messages = build_messages(st.session_state.messages)
-            assistant_message = st.write_stream(stream_response(chat, messages))
-            st.session_state.messages.append({"role": "assistant", "content": assistant_message})
+            try:
+                if provider == "OpenAI" and chat is not None:
+                    assistant_message = st.write_stream(stream_openai_response(chat, messages))
+                elif provider == "Ollama" and validated_ollama_url:
+                    assistant_message = st.write_stream(
+                        stream_ollama_response(
+                        validated_ollama_url,
+                        model,
+                        messages,
+                        float(temperature),
+                        int(max_tokens),
+                    )
+                    )
+                else:
+                    assistant_message = ""
+            except Exception as exc:
+                st.error(f"Chat model error: {exc}")
+                assistant_message = ""
 
-        if st.session_state.chat_mode != "private" and st.session_state.current_chat_id:
+            if not assistant_message:
+                st.error("The model returned an empty response. Check the selected model and server availability.")
+            else:
+                st.session_state.messages.append({"role": "assistant", "content": assistant_message})
+
+        if assistant_message and st.session_state.chat_mode != "private" and st.session_state.current_chat_id:
             save_message(st.session_state.current_chat_id, "assistant", assistant_message)
             update_chat_metadata(
                 st.session_state.current_chat_id,
