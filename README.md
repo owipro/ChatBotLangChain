@@ -1,15 +1,20 @@
 # ChatGPT-like Chatbot with Streamlit & LangChain
 
-A simple, user-friendly ChatGPT clone built with Streamlit and LangChain that connects to OpenAI's API.
+A simple, user-friendly ChatGPT clone built with Streamlit and LangChain that can connect to either OpenAI or a local Ollama model.
 
 ## Features
 
 ✨ **Simple & Intuitive UI** - Clean chat interface with message history
 🔐 **Secure API Key Input** - Enter your API key directly in the app (or via .env file)
+🏠 **Local LLM Support** - Switch to Ollama by entering a URL like `http://localhost:11434`
+🔎 **Auto-Detected Ollama Models** - The app reads available local models from `/api/tags`
+🗂️ **Persistent Chat History** - Chats are stored in a local SQLite database and can be continued later
 ⚙️ **Customizable Settings** - Choose model, adjust temperature, set max tokens
-🧠 **Multiple Models** - Support for GPT-4o-mini, GPT-4o, and GPT-3.5-turbo
+🧠 **Multiple Models** - Support for GPT-4o-mini, GPT-4o, GPT-3.5-turbo, and local Ollama models
 📝 **Full Chat History** - Maintain conversation context throughout your session
 📡 **Streaming Responses** - Tokens appear live as the model generates them
+🧹 **Delete Chats** - Remove stored conversations whenever you want
+🔒 **Private Chats** - Start a chat that stays in memory only and is never persisted
 🧹 **Clear History** - One-click button to reset the conversation
 
 ## Installation
@@ -27,16 +32,18 @@ A simple, user-friendly ChatGPT clone built with Streamlit and LangChain that co
 pip install -r requirements.txt
 ```
 
-3. **Set up your API key** (choose one method):
+3. **Set up your model access** (choose one method):
 
    **Option A: Using environment file (Recommended for local dev)**
    ```bash
    cp .env.example .env
-   # Edit .env and add your OpenAI API key
+   # Edit .env and add your OpenAI API key and/or Ollama URL
    ```
 
    **Option B: Enter in the app**
-   - Run the app and paste your API key in the sidebar text input
+   - Run the app and choose OpenAI or Ollama in the sidebar
+   - For OpenAI, paste your API key
+   - For Ollama, enter a URL ending in `:11434` and pick from the auto-detected model list
 
 4. **(Optional) Use the PowerShell launcher**
    ```powershell
@@ -60,10 +67,15 @@ The app will open in your browser at `http://localhost:8501`
 
 ## Usage
 
-1. **Add your API Key**: Either in the `.env` file or in the sidebar text input
-2. **Select your preferences**: Choose model, temperature, and max tokens in the sidebar
-3. **Start chatting**: Type your message and press Enter
-4. **Clear history**: Click "Clear Chat History" in the sidebar whenever you want to reset
+1. **Choose your provider**: OpenAI or Ollama in the sidebar
+2. **Browse previous chats**: Select a saved conversation to continue it
+3. **Add your credentials**: OpenAI API key or Ollama URL ending in `:11434`
+4. **Select your preferences**: Choose model, temperature, and max tokens in the sidebar
+   - Ollama models are pulled automatically from the local Ollama server
+   - Local Ollama defaults to a smaller token budget that is better for CPU inference
+5. **Start chatting**: Type your message and press Enter
+6. **Use private chat**: Click "Private" to keep a temporary, non-persisted conversation
+7. **Delete chats**: Remove any saved conversation from the sidebar
 
 ## Configuration
 
@@ -71,6 +83,7 @@ The app will open in your browser at `http://localhost:8501`
 - **gpt-4o-mini**: Fast, low-cost, and a great default
 - **gpt-4o**: Stronger reasoning and writing quality
 - **gpt-3.5-turbo**: Legacy option if you already use it
+- **qwen3:4b / llama3.2 / mistral / qwen2.5**: Example local models when using Ollama
 
 ### Temperature Settings
 - **0.0** - Deterministic, focused responses (good for factual questions)
@@ -81,6 +94,11 @@ The app will open in your browser at `http://localhost:8501`
 - Controls the maximum length of responses
 - Default: 2048 tokens
 - Adjust based on your needs
+
+### Chat Storage
+- Saved chats are stored locally in `.streamlit/chat_history.sqlite3`
+- Private chats are not written to disk
+- You can continue, delete, or start a fresh chat from the sidebar
 
 ## Project Structure
 
@@ -117,8 +135,8 @@ The `.env` file is loaded automatically if it exists, allowing you to store sens
 ## Dependencies
 
 - **streamlit** - Web app framework
-- **langchain** - LLM orchestration library
 - **langchain-openai** - OpenAI integration for LangChain
+- **langchain-ollama** - Ollama integration for LangChain
 - **python-dotenv** - Environment variable management
 
 ## License
